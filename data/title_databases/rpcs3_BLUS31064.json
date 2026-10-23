@@ -1,0 +1,35 @@
+{
+    "return_code": 0,
+    "results": {
+        "BLES01776": {
+            "title": "Deadly Premonition: The Director's Cut",
+            "wiki-id": 972,
+            "status": "Playable",
+            "date": "2019-07-28",
+            "thread": 181790,
+            "commit": "090c71aa7c618fa3cc309f7e553cc30448068180",
+            "pr": 6249,
+            "network": 0
+        },
+        "BLJS10073": {
+            "title": "Red Seeds Profile",
+            "wiki-id": 972,
+            "status": "Playable",
+            "date": "2019-07-28",
+            "thread": 174012,
+            "commit": "090c71aa7c618fa3cc309f7e553cc30448068180",
+            "pr": 6249,
+            "network": 0
+        },
+        "BLUS31064": {
+            "title": "Deadly Premonition: The Director's Cut",
+            "wiki-id": 972,
+            "status": "Playable",
+            "date": "2019-07-28",
+            "thread": 200684,
+            "commit": "090c71aa7c618fa3cc309f7e553cc30448068180",
+            "pr": 6249,
+            "network": 0
+        }
+    }
+}
