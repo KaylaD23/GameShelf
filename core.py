@@ -15,6 +15,8 @@ import sys
 import time
 from typing import Iterable
 
+from multi_disc import DISC_PLATFORMS, disc_identity, eligible_disc, group_candidates
+
 APP_NAME = 'GameShelf'
 BASE = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
 DATA = BASE / 'data'
@@ -29,6 +31,7 @@ PLATFORMS = {
     'ps5': 'PlayStation 5',
     'psp': 'PlayStation Portable',
     'vita': 'PlayStation Vita',
+    'n64': 'Nintendo 64',
     'gc': 'GameCube',
     'wii': 'Nintendo Wii',
     'wiiu': 'Nintendo Wii U',
@@ -36,14 +39,17 @@ PLATFORMS = {
     'switch': 'Nintendo Switch',
     'xbox': 'Original Xbox',
     'xbox360': 'Xbox 360',
+    'xboxone': 'Xbox One',
+    'dreamcast': 'Sega Dreamcast',
 }
 
 # Family headings are display-only. Each platform remains its own filter,
 # including the separate PlayStation 4/5 and Xbox/360 entries.
 CONSOLE_GROUPS = (
     ('PLAYSTATION', ('ps1','ps2','ps3','ps4','ps5','psp','vita')),
-    ('NINTENDO', ('gc','wii','wiiu','3ds','switch')),
-    ('XBOX', ('xbox','xbox360')),
+    ('NINTENDO', ('n64','gc','wii','wiiu','3ds','switch')),
+    ('XBOX', ('xbox','xbox360','xboxone')),
+    ('SEGA', ('dreamcast',)),
 )
 
 @dataclass(frozen=True)
@@ -66,11 +72,17 @@ EMULATORS = (
     Emulator('citron','Citron',('switch',),'citron.exe','Citron'),
     Emulator('xemu','xemu',('xbox',),'xemu.exe','Xemu'),
     Emulator('xenia','Xenia Canary',('xbox360',),'xenia_canary.exe','Xenia Canary'),
+    # WinDurango is a compatibility DLL layer, NOT a traditional emulator GUI.
+    # This file is a presence marker; never execute the DLL or its watchdog.
+    Emulator('windurango','WinDurango (compatibility layer)',('xboxone',),'WinDurango.Common.dll','WinDurango','experimental'),
     Emulator('shadps4','shadPS4',('ps4',),'shadPS4.exe','shadps4/Versions/Pre-release','experimental'),
     Emulator('sharpemu','SharpEmu',('ps5',),'SharpEmu.exe','sharpemu-0.0.3-release.2-win-x64','experimental'),
     Emulator('duckstation','DuckStation',('ps1',),'duckstation-qt-x64-ReleaseLTCG.exe','duckstation'),
     Emulator('pcsx2','PCSX2',('ps2',),'pcsx2-qtx64-avx2.exe','pcsx2'),
     Emulator('ppsspp','PPSSPP',('psp',),'PPSSPPWindows64.exe','ppsspp'),
+    Emulator('project64','Project64',('n64',),'Project64.exe','Project64'),
+    Emulator('luna_project64',"Luna's Project64",('n64',),'Project64.exe','LunasProject64'),
+    Emulator('flycast','Flycast',('dreamcast',),'flycast.exe','Flycast'),
 )
 BY_KEY={e.key:e for e in EMULATORS}
 
@@ -101,6 +113,8 @@ def detect_bundled_executables(base: Path = BASE) -> dict[str, str]:
         result[key] = relative.as_posix()
     return result
 SUFFIXES = {
+    'n64':{'.z64','.n64','.v64','.zip','.rom','.ndd','.d64'},
+    'dreamcast':{'.gdi','.cdi','.chd','.cue'},
     'gc':{'.iso','.gcm','.rvz','.gcz','.wia','.nkit.iso'},
     'wii':{'.iso','.wbfs','.rvz','.gcz','.wia','.nkit.iso'},
     'wiiu':{'.wud','.wux','.rpx','.wua'},
@@ -108,6 +122,8 @@ SUFFIXES = {
     'switch':{'.nsp','.xci','.nro','.nca'},
     'xbox':{'.iso','.xiso'},
     'xbox360':{'.iso','.xex'},
+    # Xbox One requires an installed/prepared Windows game, not a raw disc ISO.
+    'xboxone':set(),
     'ps3':{'.self','.elf'},
     'ps4':{'.elf','.self'},
     'ps5':{'.zar','.elf'},
@@ -122,11 +138,59 @@ def path_norm(value: str | Path) -> str:
     return str(Path(value).expanduser().resolve(strict=False))
 
 
-def safe_name(path: str | Path) -> str:
+def _filename_words(path: str | Path) -> str:
+    """Apply the established filename cleanup before display casing."""
     name = Path(path).stem
     name = re.sub(r'\([^)]*\)|\[[^]]*\]', ' ', name)
     name = re.sub(r'[_\-.]+', ' ', name)
-    return re.sub(r'\s+', ' ', name).strip().title() or 'Untitled'
+    return re.sub(r'\s+', ' ', name).strip()
+
+
+# Valid standalone Roman numerals (not arbitrary acronyms containing I or V).
+_ROMAN_NUMERAL = re.compile(
+    r'M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})'
+)
+
+
+def _is_game_sequel_numeral(word: str) -> bool:
+    """Limit preservation to plausible sequel numbers, not words like MIX.
+
+    MIX also happens to be a valid Roman number (1009), but game titles use
+    it as an ordinary word far more often than as an installment number.
+    """
+    if len(word) < 2 or word != word.upper() or not _ROMAN_NUMERAL.fullmatch(word):
+        return False
+    values = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100, 'D': 500, 'M': 1000}
+    total = 0
+    for index, letter in enumerate(word):
+        value = values[letter]
+        total += -value if index + 1 < len(word) and value < values[word[index + 1]] else value
+    return 2 <= total <= 50
+
+
+def _legacy_safe_name(path: str | Path) -> str:
+    """v0.9.13 formatting, used ONLY to identify previously auto-named titles."""
+    return _filename_words(path).title() or 'Untitled'
+
+
+def safe_name(path: str | Path) -> str:
+    """Create a game title without lowercasing Roman numerals in filenames.
+
+    For example, `Phantasy Star Online Episode I & II.iso` must display `II`,
+    not `Ii`. Preserve originally UPPERCASE Roman numerals only; other words
+    continue to use the same title-casing behaviour as earlier releases.
+    """
+    name = _filename_words(path)
+    if not name:
+        return 'Untitled'
+
+    def case_word(match: re.Match) -> str:
+        word = match.group(0)
+        if _is_game_sequel_numeral(word):
+            return word
+        return word.title()
+
+    return re.sub(r'[^\W\d_]+', case_word, name)
 
 
 def detect_executables(roots: Iterable[str | Path]) -> dict[str,str]:
@@ -219,6 +283,15 @@ def launch_args(key:str, content: str | Path, fullscreen: bool=True) -> list[str
     Unsupported formats fail rather than pretending a boot method is available.
     """
     p=Path(content)
+    if key=='windurango':
+        raise ValueError('WinDurango is a compatibility layer. Select a prepared Xbox One game executable; do not launch the runtime DLL.')
+    if key=='flycast':
+        # Standard standalone Flycast accepts the image file as positional argv.
+        return [*(['-config','window:fullscreen=yes'] if fullscreen else []),str(p)]
+    if key in ('project64','luna_project64'):
+        # Project64 forks accept a positional ROM/disk path. Fullscreen is
+        # configured inside the emulator; no invented command-line switches.
+        return [str(p)]
     if key=='dolphin':
         args=['--batch','--exec',str(p)]
         if fullscreen: args=['--config','Dolphin.Display.Fullscreen=True',*args]
@@ -294,6 +367,23 @@ def launch_command(executable:str, emulator:str, content:str, fullscreen:bool,
     if emulator not in BY_KEY: raise ValueError('Invalid emulator')
     p=Path(content)
     if emulator!='vita3k' and not p.exists(): raise FileNotFoundError(f'Game path not found: {p}')
+    if emulator=='windurango':
+        from windurango_support import prepared_game_executable
+        if e.name.lower() != 'windurango.common.dll':
+            raise ValueError('Choose the WinDurango.Common.dll runtime marker, not WinDurango.Watchdog.exe.')
+        game_exe=prepared_game_executable(p)
+        if os.name == 'nt':
+            # A DLL marker isn't a valid Windows AppX registration. For UWP
+            # games the WinDurango guide explicitly requires registration.
+            from windurango_support import find_registration_manifest
+            from windurango_diagnostics import windows_registration_status
+            manifest=find_registration_manifest(game_exe)
+            if manifest is not None and windows_registration_status(manifest).startswith('NOT REGISTERED'):
+                raise ValueError('Xbox One game is not registered for this Windows account. '
+                                 'Use Diagnose WinDurango Launch for the exact manual '
+                                 'AppX registration command; GameShelf will not change '
+                                 'Windows registration without your approval.')
+        return [str(game_exe)], str(game_exe.parent)
     if emulator=='kyty':
         if kyty_mode=='native':
             gui=kyty_native_launcher(e)
@@ -312,6 +402,13 @@ def launch_command(executable:str, emulator:str, content:str, fullscreen:bool,
 def launch(executable:str, emulator:str, content:str, fullscreen:bool,
            *, kyty_mode:str='direct', ps3_args:str='', log_path:str | Path | None=None) -> subprocess.Popen:
     cmd,cwd=launch_command(executable,emulator,content,fullscreen,kyty_mode=kyty_mode,ps3_args=ps3_args)
+    if emulator=='windurango' and os.name=='nt':
+        from windurango_support import find_registration_manifest
+        from uwp_activation import launch_registered_game, ActivationError
+        if not find_registration_manifest(cmd[0]):
+            raise ActivationError('WinDurango game has no AppxManifest.xml. GameShelf cannot activate '
+                                  'it as a registered UWP application. Prepare/register the game first.')
+        return launch_registered_game(cmd[0])
     if log_path is None:
         return subprocess.Popen(cmd,cwd=cwd,shell=False)
     # Capture direct-mode stdout/stderr, even if the Kyty process terminates instantly.
@@ -356,6 +453,13 @@ def scan_games(root: str | Path, platform: str, *, max_games:int=5000) -> list[t
             if 'eboot.bin' in filemap and 'demo' not in {p.lower() for p in loc.parts}:
                 # eboot.bin may be a PS4 or PS5 dump. Import only into the selected console.
                 add(loc); folders[:]=[]; continue
+        if platform=='xboxone':
+            from windurango_support import locate_prepared_game
+            game=locate_prepared_game(loc,files)
+            if game is not None:
+                add(game,loc.name if loc.name.lower() != 'mount' else loc.parent.name)
+                folders[:]=[]
+                continue
         if platform=='xbox360' and 'default.xex' in filemap:
             add(loc / filemap['default.xex'],loc.name)
             folders[:]=[]
@@ -393,21 +497,132 @@ class Library:
           seconds_played INTEGER NOT NULL DEFAULT 0,
           last_played INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL DEFAULT 0,
-          ps3_args TEXT NOT NULL DEFAULT ''
+          ps3_args TEXT NOT NULL DEFAULT '',
+          selected_disc INTEGER NOT NULL DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS game_title ON games(title);
+        CREATE TABLE IF NOT EXISTS game_discs(
+          game_id INTEGER NOT NULL,
+          disc_number INTEGER NOT NULL,
+          path TEXT NOT NULL,
+          PRIMARY KEY(game_id, disc_number),
+          FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
+        );
         ''')
         # Older installs already have their library.sqlite3. Add just this one
         # column in place, without deleting game records or resetting artwork.
         columns={row['name'] for row in self.db.execute('PRAGMA table_info(games)')}
         if 'ps3_args' not in columns:
             self.db.execute("ALTER TABLE games ADD COLUMN ps3_args TEXT NOT NULL DEFAULT ''")
+        if 'selected_disc' not in columns:
+            self.db.execute('ALTER TABLE games ADD COLUMN selected_disc INTEGER NOT NULL DEFAULT 1')
+        self.db.execute('CREATE INDEX IF NOT EXISTS game_discs_by_game ON game_discs(game_id)')
         self.db.commit()
+        self._repair_legacy_roman_titles()
+
+    def _repair_legacy_roman_titles(self) -> None:
+        """Repair exact auto-generated v0.9.13 names, not user-edited names.
+
+        A title qualifies only if it still exactly matches the previous
+        filename-to-title converter and the original filename contains an
+        uppercase Roman numeral. Never change a title from a compatibility
+        database or one manually edited to something different.
+        """
+        repairs = []
+        for row in self.db.execute('SELECT id,title,path FROM games'):
+            before = _legacy_safe_name(row['path'])
+            if row['title'] != before:
+                continue
+            after = safe_name(row['path'])
+            if after != before:
+                repairs.append((after, row['id'], before))
+        if repairs:
+            with self.db:
+                self.db.executemany(
+                    'UPDATE games SET title=? WHERE id=? AND title=?', repairs
+                )
+
     def all(self)->list[dict]:
-        return [dict(row) for row in self.db.execute('SELECT * FROM games ORDER BY title COLLATE NOCASE')]
+        games=[dict(row) for row in self.db.execute('SELECT * FROM games ORDER BY title COLLATE NOCASE')]
+        # One extra query for all disc rows. Never one query per thumbnail.
+        discs={}
+        for row in self.db.execute('SELECT * FROM game_discs ORDER BY game_id,disc_number'):
+            discs.setdefault(row['game_id'],[]).append(dict(row))
+        for game in games:
+            game['discs']=discs.get(game['id'],[])
+            game['disc_count']=len(game['discs']) or 1
+        return games
     def get(self,identifier:int)->dict | None:
         row=self.db.execute('SELECT * FROM games WHERE id=?',(identifier,)).fetchone()
-        return dict(row) if row else None
+        if row is None:return None
+        game=dict(row)
+        game['discs']=[dict(d) for d in self.db.execute(
+            'SELECT * FROM game_discs WHERE game_id=? ORDER BY disc_number',(identifier,))]
+        game['disc_count']=len(game['discs']) or 1
+        return game
+
+    def set_discs(self,identifier:int, paths:list[str]):
+        """Manual disc list; never deletes/modifies ISO/CUE/CHD files."""
+        game=self.get(identifier)
+        if game is None:raise ValueError('Unknown game')
+        if game['emulator'] not in BY_KEY or game['platform'] not in BY_KEY[game['emulator']].platforms:
+            raise ValueError('The selected emulator cannot launch this console')
+        if game['platform'] not in DISC_PLATFORMS:raise ValueError('This platform does not support disc lists')
+        paths=[path_norm(p) for p in paths]
+        if len(paths)<2 or len(set(p.casefold() for p in paths))!=len(paths):
+            raise ValueError('Select at least two distinct disc images')
+        if not all(eligible_disc(game['platform'],p) and Path(p).is_file() for p in paths):
+            raise ValueError('All disc images must exist and use supported disc formats for this console')
+        if paths[0].casefold()!=game['path'].casefold():
+            raise ValueError('Disc 1 must be the current primary game path')
+        with self.db:
+            self.db.execute('DELETE FROM game_discs WHERE game_id=?',(identifier,))
+            self.db.executemany('INSERT INTO game_discs(game_id,disc_number,path) VALUES(?,?,?)',
+                                ((identifier,i,path) for i,path in enumerate(paths,1)))
+            self.db.execute('UPDATE games SET selected_disc=1 WHERE id=?',(identifier,))
+
+    def choose_disc(self,identifier:int,number:int):
+        game=self.get(identifier)
+        if not game or len(game['discs'])<2 or number not in [d['disc_number'] for d in game['discs']]:
+            raise ValueError('Disc is not present in this game')
+        with self.db:self.db.execute('UPDATE games SET selected_disc=? WHERE id=?',(number,identifier))
+
+    def auto_merge_discs(self)->list[dict]:
+        """Merge only unambiguous numbered sets of the same platform/emulator.
+
+        All game image files remain unchanged; duplicate library rows are
+        removed, but their playtime and favourites are carried into disc 1.
+        """
+        result=[]
+        candidates=group_candidates(self.all())
+        for group in candidates:
+            primary=group[0]
+            # Files must exist; this is an explicit library operation.
+            if not all(Path(g['path']).is_file() for g in group):continue
+            with self.db:
+                for g in group:
+                    disc_number=disc_identity(g['title'],g['path'])[1]
+                    self.db.execute('INSERT OR REPLACE INTO game_discs(game_id,disc_number,path) VALUES(?,?,?)',
+                                    (primary['id'],disc_number,g['path']))
+                for game in group[1:]:
+                    self.db.execute('UPDATE games SET seconds_played=seconds_played+?,favorite=MAX(favorite,?),last_played=MAX(last_played,?) WHERE id=?',
+                                    (game['seconds_played'],game['favorite'],game['last_played'],primary['id']))
+                    if not primary['artwork'] and game['artwork']:
+                        self.db.execute('UPDATE games SET artwork=? WHERE id=?',(game['artwork'],primary['id']))
+                        primary['artwork']=game['artwork']
+                    self.db.execute('DELETE FROM games WHERE id=?',(game['id'],))
+                self.db.execute('UPDATE games SET selected_disc=1 WHERE id=?',(primary['id'],))
+                # Only strip an unambiguous disc marker; preserve region text.
+                base=disc_identity(primary['title'],primary['path'])
+                if base:
+                    import re
+                    from multi_disc import DISC_MARKER, DISC_WRAPPER
+                    clean=DISC_WRAPPER.sub(' ',primary['title'])
+                    clean=DISC_MARKER.sub(' ',clean)
+                    clean=re.sub(r'\s+', ' ',clean).strip(' -_')
+                    if clean:self.db.execute('UPDATE games SET title=? WHERE id=?',(clean,primary['id']))
+            result.append({'id':primary['id'],'count':len(group),'title':primary['title']})
+        return result
     def add(self,title:str,platform:str,emulator:str,path:str)->bool:
         if platform not in PLATFORMS or emulator not in BY_KEY:raise ValueError('Invalid platform/emulator')
         normalized=path_norm(path) if not re.fullmatch(r'PC[A-Z]{2}\d{5}',path.upper()) else path.upper()
@@ -416,12 +631,20 @@ class Library:
                               (title.strip() or safe_name(path),platform,emulator,normalized,int(time.time())))
         return bool(c.rowcount)
     def edit(self,identifier:int,**fields):
-        allowed={'title','emulator','platform','path','artwork','favorite','seconds_played','last_played','ps3_args'}
+        allowed={'title','emulator','platform','path','artwork','favorite','seconds_played','last_played','ps3_args','selected_disc'}
         if not fields or not set(fields)<=allowed:raise ValueError('Invalid fields')
+        if any(k in fields for k in ('path','platform','emulator')):
+            game=self.get(identifier)
+            if game and game['disc_count']>1:
+                for key in ('path','platform','emulator'):
+                    if key in fields and fields[key]!=game[key]:
+                        raise ValueError('Use Manage Discs for multi-disc games; changing the primary disc or emulator here would break the set')
         cols=', '.join(f'{key}=?' for key in fields)
         with self.db:self.db.execute(f'UPDATE games SET {cols} WHERE id=?',(*fields.values(),identifier))
     def remove(self,identifier:int):
-        with self.db:self.db.execute('DELETE FROM games WHERE id=?',(identifier,))
+        with self.db:
+            self.db.execute('DELETE FROM game_discs WHERE game_id=?',(identifier,))
+            self.db.execute('DELETE FROM games WHERE id=?',(identifier,))
     def add_playtime(self,identifier:int,seconds:int):
         with self.db:self.db.execute('UPDATE games SET seconds_played=seconds_played+?,last_played=? WHERE id=?',
                                      (max(0,seconds),int(time.time()),identifier))
@@ -431,7 +654,7 @@ class Library:
 class Settings:
     def __init__(self,path:Path | None=None):
         self.path=path or DATA/'settings.json'
-        self.values={'emulators':{},'rom_roots':[],'last_mode':'desktop','startup_mode':'desktop','desktop_maximized':True,'kyty_launch_mode':'direct'}
+        self.values={'emulators':{},'rom_roots':[],'last_mode':'desktop','startup_mode':'desktop','desktop_maximized':True,'kyty_launch_mode':'direct','ra_auto_configure':False,'theme':'dark'}
         if self.path.is_file():
             try:
                 loaded=json.loads(self.path.read_text(encoding='utf-8'))

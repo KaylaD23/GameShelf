@@ -93,6 +93,13 @@ class EmulatorProcessMonitor:
         except self.api.Error:
             return False
 
+    def process_ids(self) -> set[int]:
+        """Tracked PIDs for an emulator window, not unrelated applications."""
+        result=set(self._children)
+        if self.pid is not None and self.process.poll() is None:
+            result.add(self.pid)
+        return result
+
     def running(self):
         """True until direct emulator/descendant has exited; nonblocking."""
         # Popen.poll() reaps the child and keeps the original PID from being reused.

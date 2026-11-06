@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from html import escape as html_escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal, QSize
@@ -13,10 +14,11 @@ from PySide6.QtWidgets import (
 )
 
 from cover_downloader import (
-    find_covers, preview_bytes, save_cover, best_bulk_match, CoverError, test_steamgriddb_key
+    find_covers, preview_bytes, save_cover, best_bulk_match, automatic_bulk_match, best_libretro_bulk, choose_bulk_cover, RedumpLookupState, CoverError, PROVIDERS, test_steamgriddb_key, explicit_serial
 )
+from cover_batch import run_batch
 from core import DATA
-from api_key_store import KeyStoreError, load_api_key, save_api_key, forget_api_key
+from api_key_store import KeyStoreError, load_provider_key, save_provider_key, forget_provider_key
 
 
 def new_label(text, wrap=False):
@@ -30,13 +32,13 @@ class SearchWorker(QThread):
     thumb = Signal(int, bytes)
     problem = Signal(str)
 
-    def __init__(self, title, provider, key, parent=None):
+    def __init__(self, title, provider, key, game=None, parent=None):
         super().__init__(parent)
-        self.title, self.provider, self.key = title, provider, key
+        self.title, self.provider, self.key, self.game = title, provider, key, game
 
     def run(self):
         try:
-            results = find_covers(self.title, self.provider, self.key)
+            results = find_covers(self.title, self.provider, self.key, self.game)
             if self.isInterruptionRequested():
                 return
             self.found.emit(results)
@@ -59,13 +61,17 @@ class KeyTestWorker(QThread):
     success = Signal()
     problem = Signal(str)
 
-    def __init__(self, key, parent=None):
+    def __init__(self, key, provider='SteamGridDB', parent=None):
         super().__init__(parent)
         self.key = key
+        self.provider = provider
 
     def run(self):
         try:
-            test_steamgriddb_key(self.key)
+            if self.provider == 'SteamGridDB':
+                test_steamgriddb_key(self.key)
+            else:
+                raise CoverError('This provider has no API-key test.')
             self.success.emit()
         except CoverError as exc:
             self.problem.emit(str(exc))
@@ -91,34 +97,38 @@ class SaveWorker(QThread):
             self.problem.emit(f'Saving the cover failed ({type(exc).__name__}).')
 
 
-def initial_api_key() -> str:
+def initial_api_key(provider='SteamGridDB') -> str:
     try:
-        return load_api_key()
+        return load_provider_key(provider)
     except KeyStoreError:
-        # Never crash the cover browser because the OS vault is locked.
-        return os.environ.get('STEAMGRIDDB_API_KEY', '')
+        # Never crash the artwork browser because the OS key store is locked.
+        return os.environ.get('STEAMGRIDDB_API_KEY', '') if provider == 'SteamGridDB' else ''
 
 
-def store_field_key(field: QLineEdit, status: QLabel) -> str | None:
-    """User explicitly saved the key or started a SteamGridDB operation."""
+def store_field_key(field: QLineEdit, status: QLabel, provider='SteamGridDB') -> str | None:
+    """Save a token only into the selected provider's dedicated vault slot."""
     try:
-        token = save_api_key(field.text())
+        token = save_provider_key(provider, field.text())
     except (KeyStoreError, CoverError) as exc:
         status.setText(str(exc))
         return None
     field.setText(token)
-    status.setText('SteamGridDB API key saved securely for future sessions.')
+    status.setText(f'{provider} API key saved securely for future sessions.')
     return token
 
 
-def forget_field_key(field: QLineEdit, status: QLabel) -> None:
+def forget_field_key(field: QLineEdit, status: QLabel, provider='SteamGridDB') -> None:
     try:
-        forget_api_key()
+        forget_provider_key(provider)
     except KeyStoreError as exc:
         status.setText(str(exc))
         return
     field.clear()
-    status.setText('Saved SteamGridDB key removed from this computer.')
+    status.setText(f'Saved {provider} API key removed from this computer.')
+
+
+def uses_api_key(provider: str) -> bool:
+    return provider == 'SteamGridDB'
 
 
 class CoverBrowser(QDialog):
@@ -148,7 +158,7 @@ class CoverBrowser(QDialog):
         self.title.returnPressed.connect(self.search)
         search.addWidget(self.title, 2)
         self.provider = QComboBox()
-        self.provider.addItems(['Wikipedia', 'SteamGridDB'])
+        self.provider.addItems(list(PROVIDERS))
         self.provider.currentTextChanged.connect(self.switch_provider)
         search.addWidget(self.provider)
         self.search_btn = QPushButton('Search Covers')
@@ -157,7 +167,7 @@ class CoverBrowser(QDialog):
 
         key_row = QHBoxLayout()
         root.addLayout(key_row)
-        self.key_label = new_label('SteamGridDB API key (only needed for SteamGridDB):')
+        self.key_label = new_label('API key:')
         self.key_input = QLineEdit(initial_api_key())
         self.key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.key_input.setPlaceholderText('Enter once, saved securely on this computer')
@@ -167,20 +177,21 @@ class CoverBrowser(QDialog):
         self.key_test_btn.clicked.connect(self.test_key)
         key_row.addWidget(self.key_test_btn)
         self.key_save_btn = QPushButton('Save Key')
-        self.key_save_btn.clicked.connect(lambda: store_field_key(self.key_input, self.status))
+        self.key_save_btn.clicked.connect(lambda: store_field_key(self.key_input, self.status, self.provider.currentText()))
         key_row.addWidget(self.key_save_btn)
         self.key_forget_btn = QPushButton('Forget Key')
-        self.key_forget_btn.clicked.connect(lambda: forget_field_key(self.key_input, self.status))
+        self.key_forget_btn.clicked.connect(lambda: forget_field_key(self.key_input, self.status, self.provider.currentText()))
         key_row.addWidget(self.key_forget_btn)
         self.key_label.hide()
         self.key_input.hide()
         self.key_test_btn.hide()
         self.key_save_btn.hide()
         self.key_forget_btn.hide()
-        self.status = new_label('Wikipedia is available without an API key. SteamGridDB offers portrait-style game covers.', True)
+        self.status = new_label('Libretro Thumbnails searches console-specific box-art catalogues. PS Covers uses disc serials; GOG, Steam Store, Wikipedia, Redump-assisted and SteamGridDB remain available.', True)
         root.addWidget(self.status)
         if self.key_input.text().strip():
             self.provider.setCurrentText('SteamGridDB')
+        self.switch_provider(self.provider.currentText())
 
         sc = QScrollArea()
         sc.setWidgetResizable(True)
@@ -195,6 +206,9 @@ class CoverBrowser(QDialog):
         root.addLayout(buttons)
         self.selection_label = new_label('No artwork selected')
         buttons.addWidget(self.selection_label, 1)
+        self.source_label = new_label('')
+        self.source_label.setOpenExternalLinks(True)
+        root.addWidget(self.source_label)
         self.download_btn = QPushButton('Download Selected Cover')
         self.download_btn.setObjectName('accent')
         self.download_btn.setEnabled(False)
@@ -205,26 +219,31 @@ class CoverBrowser(QDialog):
         buttons.addWidget(self.close_btn)
         self.search()
 
-    def switch_provider(self):
-        uses_key = self.provider.currentText() == 'SteamGridDB'
-        self.key_label.setVisible(uses_key)
-        self.key_input.setVisible(uses_key)
-        self.key_test_btn.setVisible(uses_key)
-        self.key_save_btn.setVisible(uses_key)
-        self.key_forget_btn.setVisible(uses_key)
+    def switch_provider(self, provider):
+        keyed = uses_api_key(provider)
+        self.key_label.setVisible(keyed)
+        self.key_input.setVisible(keyed)
+        self.key_test_btn.setVisible(keyed)
+        self.key_save_btn.setVisible(keyed)
+        self.key_forget_btn.setVisible(keyed)
+        if keyed:
+            self.key_label.setText(f'{provider} API key:')
+            self.key_input.setText(initial_api_key(provider))
+            self.key_input.setPlaceholderText(f'Save your {provider} key securely')
 
     def test_key(self):
         if self.busy():
             return
-        token = store_field_key(self.key_input, self.status)
+        token = store_field_key(self.key_input, self.status, self.provider.currentText())
         if token is None:
             return
         self.key_test_btn.setEnabled(False)
         self.search_btn.setEnabled(False)
-        self.status.setText('Testing SteamGridDB API access...')
-        worker = KeyTestWorker(token, self)
+        provider = self.provider.currentText()
+        self.status.setText(f'Testing {provider} API access...')
+        worker = KeyTestWorker(token, provider, self)
         self.key_test_worker = worker
-        worker.success.connect(lambda: self.status.setText('SteamGridDB accepted the API key and returned a successful response.'))
+        worker.success.connect(lambda: self.status.setText(f'{provider} API request succeeded.'))
         worker.problem.connect(self.search_failed)
         worker.finished.connect(lambda: self.key_test_btn.setEnabled(True))
         worker.finished.connect(lambda: self.search_btn.setEnabled(True))
@@ -247,8 +266,8 @@ class CoverBrowser(QDialog):
             return
         provider = self.provider.currentText()
         token = ''
-        if provider == 'SteamGridDB':
-            token = store_field_key(self.key_input, self.status)
+        if uses_api_key(provider):
+            token = store_field_key(self.key_input, self.status, provider)
             if token is None:
                 return
         self.clear_tiles()
@@ -256,9 +275,10 @@ class CoverBrowser(QDialog):
         self.selected = None
         self.download_btn.setEnabled(False)
         self.selection_label.setText('No artwork selected')
+        self.source_label.clear()
         self.status.setText(f'Searching {provider} for "{title}"...')
         self.search_btn.setEnabled(False)
-        worker = SearchWorker(title, provider, token, self)
+        worker = SearchWorker(title, provider, token, self.game if title == self.game['title'] else {'platform': self.game.get('platform',''), 'path': ''}, self)
         self.search_worker = worker
         worker.found.connect(self.display_results)
         worker.thumb.connect(self.show_preview)
@@ -273,7 +293,7 @@ class CoverBrowser(QDialog):
     def display_results(self, candidates):
         self.candidates = candidates
         if not candidates:
-            self.status.setText('No suitable images found. Try another title or provider.')
+            self.status.setText('No suitable images found. Redump tracks disc metadata, not cover images; PS Covers requires a recognised PS1/PS2 serial. Try another provider or title.')
             return
         self.status.setText(f'{len(candidates)} candidate covers. Click to select one, then Download.')
         for index, candidate in enumerate(candidates):
@@ -305,6 +325,15 @@ class CoverBrowser(QDialog):
             button.setChecked(i == index)
         candidate = self.candidates[index]
         self.selection_label.setText(f'Selected: {candidate.title} ({candidate.provider})')
+        if candidate.page_url and candidate.page_url.startswith('https://'):
+            safe_link = html_escape(candidate.page_url, quote=True)
+            self.source_label.setText(f'Artwork source: <a href="{safe_link}">{html_escape(candidate.provider)}</a>')
+        else:
+            self.source_label.setText(f'Artwork source: {candidate.provider}')
+        if candidate.redump_reference and candidate.redump_reference.startswith('https://redump.info/disc/'):
+            link = html_escape(candidate.redump_reference, quote=True)
+            self.source_label.setText(self.source_label.text() +
+                f'  |  Disc match: <a href="{link}">Redump</a>')
         self.download_btn.setEnabled(True)
 
     def download(self):
@@ -376,29 +405,29 @@ class BulkWorker(QThread):
         self.games, self.provider, self.api_key = games, provider, api_key
 
     def run(self):
-        saved = skipped = failed = 0
-        last_error = ''
-        for number, game in enumerate(self.games, 1):
-            if self.isInterruptionRequested():
-                break
-            self.progress.emit(number - 1, f'Checking {number}/{len(self.games)}: {game["title"]}')
-            try:
-                candidates = find_covers(game['title'], self.provider, self.api_key)
-                chosen = best_bulk_match(game['title'], candidates, self.provider)
-                if chosen is None:
-                    skipped += 1
-                else:
-                    path = save_cover(chosen, game['id'], DATA / 'covers')
-                    self.cover_saved.emit(game['id'], str(path))
-                    saved += 1
-            except Exception as exc:
-                failed += 1
-                last_error = str(exc) if isinstance(exc, CoverError) else type(exc).__name__
-                if isinstance(exc, CoverError):
-                    self.progress.emit(number, last_error)
-                    break
-            self.progress.emit(number, f'Processed {number}/{len(self.games)} games')
-        self.complete.emit(saved, skipped, failed, last_error)
+        self.processed = 0
+        self.cancelled = False
+        self.redump_fallback = False
+        state = RedumpLookupState()
+
+        def select(game):
+            return choose_bulk_cover(game['title'], self.provider, self.api_key,
+                                     game, state)
+
+        def persist(game, candidate):
+            path = save_cover(candidate, game['id'], DATA / 'covers')
+            self.cover_saved.emit(game['id'], str(path))
+
+        result = run_batch(
+            self.games, select, persist, self.progress.emit,
+            self.isInterruptionRequested,
+            lambda exc: str(exc) if isinstance(exc, CoverError) else type(exc).__name__,
+            lambda: self.provider == 'Redump-assisted' and state.unavailable,
+        )
+        self.processed = result.processed
+        self.cancelled = result.cancelled
+        self.redump_fallback = state.unavailable
+        self.complete.emit(result.saved, result.skipped, result.failed, result.last_error)
 
 
 class BulkCoverDialog(QDialog):
@@ -415,17 +444,17 @@ class BulkCoverDialog(QDialog):
         row = QHBoxLayout()
         lay.addLayout(row)
         self.provider = QComboBox()
-        self.provider.addItems(['Wikipedia', 'SteamGridDB'])
+        self.provider.addItems(list(PROVIDERS))
         row.addWidget(self.provider)
         self.key = QLineEdit(initial_api_key())
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.key.setPlaceholderText('Saved securely for next time')
         row.addWidget(self.key, 1)
         self.key_save_btn = QPushButton('Save Key')
-        self.key_save_btn.clicked.connect(lambda: store_field_key(self.key, self.status))
+        self.key_save_btn.clicked.connect(lambda: store_field_key(self.key, self.status, self.provider.currentText()))
         row.addWidget(self.key_save_btn)
         self.key_forget_btn = QPushButton('Forget Key')
-        self.key_forget_btn.clicked.connect(lambda: forget_field_key(self.key, self.status))
+        self.key_forget_btn.clicked.connect(lambda: forget_field_key(self.key, self.status, self.provider.currentText()))
         row.addWidget(self.key_forget_btn)
         self.key.setVisible(False)
         self.key_save_btn.setVisible(False)
@@ -439,6 +468,7 @@ class BulkCoverDialog(QDialog):
         lay.addWidget(self.status)
         if self.key.text().strip():
             self.provider.setCurrentText('SteamGridDB')
+        self.switch_provider(self.provider.currentText())
         row2 = QHBoxLayout()
         lay.addLayout(row2)
         self.start_btn = QPushButton('Download Missing')
@@ -452,15 +482,18 @@ class BulkCoverDialog(QDialog):
 
     def switch_provider(self, provider):
         for widget in (self.key, self.key_save_btn, self.key_forget_btn):
-            widget.setVisible(provider == 'SteamGridDB')
+            widget.setVisible(uses_api_key(provider))
+        if uses_api_key(provider):
+            self.key.setText(initial_api_key(provider))
+            self.key.setPlaceholderText(f'Enter your {provider} API key')
 
     def start(self):
         if self.worker and self.worker.isRunning():
             return
         provider = self.provider.currentText()
         token = ''
-        if provider == 'SteamGridDB':
-            token = store_field_key(self.key, self.status)
+        if uses_api_key(provider):
+            token = store_field_key(self.key, self.status, provider)
             if token is None:
                 return
         self.start_btn.setEnabled(False)
@@ -474,11 +507,21 @@ class BulkCoverDialog(QDialog):
         worker.start()
 
     def finished_batch(self, saved, skipped, failed, error):
-        self.bar.setValue(self.bar.maximum())
-        self.status.setText(f'Downloaded {saved}; skipped {skipped}; failed {failed}.' +
-                            (f' Last error: {error}' if error else ''))
+        processed = getattr(self.worker, 'processed', saved + skipped + failed)
+        self.bar.setValue(processed)
+        cancelled = bool(getattr(self.worker, 'cancelled', False))
+        fallback = bool(getattr(self.worker, 'redump_fallback', False))
+        label = 'Cancelled' if cancelled else 'Finished'
+        message = (f'{label}: processed {processed}/{len(self.games)}; '
+                   f'downloaded {saved}; skipped {skipped}; failed {failed}.')
+        if fallback:
+            message += ' Redump unavailable; alternative artwork sources were used.'
+        if error:
+            message += f' Last error: {error}'
+        self.status.setText(message)
+        self.cancel_btn.setEnabled(True)
         self.cancel_btn.setText('Close')
-        self.start_btn.setText('Finished')
+        self.start_btn.setText(label)
 
     def reject(self):
         if self.worker and self.worker.isRunning():

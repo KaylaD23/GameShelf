@@ -12,6 +12,8 @@ from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSize, QRect, QR
 from PySide6.QtGui import QColor, QFont, QImageReader, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPixmapCache
 from PySide6.QtWidgets import QListView, QStyledItemDelegate, QStyle
 
+from theme_manager import color as theme_color
+from wheel_scroll import enable_smooth_wheel
 from cover_geometry import poster_fill_rect
 from core import PLATFORMS
 
@@ -169,14 +171,14 @@ class GameDelegate(QStyledItemDelegate):
             a,b=palette[sum(map(ord,game['title']))%len(palette)]
             gradient.setColorAt(0,QColor(a));gradient.setColorAt(1,QColor(b))
             painter.fillRect(poster,gradient)
-            painter.setPen(QColor('#b6dfff'))
+            painter.setPen(QColor(theme_color('#b6dfff')))
             f=QFont('Segoe UI',10,QFont.Weight.Bold);painter.setFont(f)
             painter.drawText(poster.adjusted(10,8,-8,-8),Qt.AlignmentFlag.AlignTop|Qt.TextFlag.TextWordWrap,PLATFORMS.get(game['platform'],'GAME').upper())
-            painter.setPen(QColor('#f6fbff'))
+            painter.setPen(QColor(theme_color('#f6fbff')))
             f=QFont('Segoe UI',14,QFont.Weight.Bold);painter.setFont(f)
             painter.drawText(poster.adjusted(12,50,-10,-14),Qt.AlignmentFlag.AlignBottom|Qt.TextFlag.TextWordWrap,game['title'])
 
-        painter.setPen(QColor('#f4f6fa'))
+        painter.setPen(QColor(theme_color('#f4f6fa')))
         f=QFont('Segoe UI',14 if self.large else 12,QFont.Weight.Bold)
         painter.setFont(f)
         title_y=poster.bottom()+8
@@ -185,7 +187,7 @@ class GameDelegate(QStyledItemDelegate):
             painter.drawText(title_rect,Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignVCenter,line)
             title_y+=21 if self.large else 18
         f=QFont('Segoe UI',10);painter.setFont(f)
-        painter.setPen(QColor('#98aec7'))
+        painter.setPen(QColor(theme_color('#98aec7')))
         plat=PLATFORMS.get(game['platform'],game['platform'])
         platform_text=painter.fontMetrics().elidedText(plat,Qt.TextElideMode.ElideRight,pw-2)
         painter.drawText(QRect(poster.x()+1,r.bottom()-31,pw-2,19),Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignVCenter,platform_text)
@@ -205,6 +207,7 @@ def make_game_view(large=False, parent=None):
     view.setGridSize(BIG_GRID if large else DESKTOP_GRID)
     view.setSpacing(3)
     view.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
+    enable_smooth_wheel(view)
     view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     view.setSelectionMode(QListView.SelectionMode.SingleSelection)
     view.setMouseTracking(True)

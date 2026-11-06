@@ -11,23 +11,32 @@ import time
 
 try:
     from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QRect
-    from PySide6.QtGui import QPainter, QPixmap, QColor, QFont, QBrush, QPen, QLinearGradient, QKeySequence, QShortcut
+    from PySide6.QtGui import QPainter, QPixmap, QColor, QFont, QBrush, QPen, QLinearGradient, QKeySequence, QShortcut, QIcon
     from PySide6.QtWidgets import (
         QApplication,QMainWindow,QWidget,QFrame,QLabel,QPushButton,QLineEdit,
         QVBoxLayout,QHBoxLayout,QGridLayout,QScrollArea,QListWidget,QListWidgetItem,
         QFileDialog,QDialog,QDialogButtonBox,QFormLayout,QComboBox,QMessageBox,
-        QStackedWidget,QSplitter,QSizePolicy,QInputDialog,QMenu,QAbstractItemView,QPlainTextEdit
+        QStackedWidget,QSplitter,QSizePolicy,QInputDialog,QMenu,QAbstractItemView,QPlainTextEdit,QCheckBox
     )
 except ImportError:
     print('PySide6 is required. On Windows, run INSTALL_AND_RUN.bat',file=sys.stderr)
     raise
 
+from app_identity import register_windows_app_id, load_icon, resource_path
+from windurango_support import validate_game_path, preparation_plan, apply_preparation_plan, embedded_xvd_relocation_plan, relocate_embedded_xvd, registration_command, SUPPORT_URL
+from windurango_diagnostics import create_diagnostic_report, status_name
+from brand_wordmark import GameShelfWordmark
+from theme_manager import THEMES, THEME_KEYS, normalize_theme, activate as activate_theme, stylesheet as theme_stylesheet, color as theme_color
+from multi_disc import DISC_PLATFORMS, DISC_IMAGE_EXTS, write_duckstation_playlist, next_disc_number
+from disc_hotkey import send_duckstation_next_disc
 from cover_geometry import poster_fill_rect
 from version_info import APP_VERSION
+from retro_achievements import SUPPORTED as RA_SUPPORTED, configure as configure_ra, configure_all as configure_ra_all
 from controller_input import Controller, UP, DOWN, LEFT, RIGHT, A, B, X, Y, LB, RB, START, BACK
 from emulator_lifecycle import EmulatorProcessMonitor
 from window_geometry import safe_desktop_rect
 from library_view import make_game_view
+from wheel_scroll import enable_smooth_wheel
 from title_lookup import TitleResolver, detect_id
 
 from core import (
@@ -102,7 +111,7 @@ class Poster(QWidget):
         p.setClipRect(self.rect())
         # Match the card background. The card already owns the selection outline.
         # Do not draw another frame, shadow, enlarged backdrop or overlaid copy.
-        p.fillRect(self.rect(), QColor('#1c2635'))
+        p.fillRect(self.rect(), QColor(theme_color('#1c2635')))
         if not self.pix.isNull():
             # Map the complete source bitmap directly into the full poster box.
             # Slight distortion beats either cutting off text or dark side bars.
@@ -115,10 +124,10 @@ class Poster(QWidget):
             p.setPen(QPen(QColor(255,255,255,17),2))
             p.drawEllipse(int(w*.12),int(h*.1),int(w*.94),int(h*.67))
             p.drawEllipse(int(w*.37),int(h*.47),int(w*.86),int(h*.57))
-            p.setPen(QColor('#b6dfff'))
+            p.setPen(QColor(theme_color('#b6dfff')))
             font=QFont('Segoe UI',11);font.setBold(True);p.setFont(font)
             p.drawText(self.rect().adjusted(14,12,-10,-20),Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignTop,PLATFORMS.get(self.game['platform'],'GAME').upper())
-            p.setPen(QColor('#f6fbff'))
+            p.setPen(QColor(theme_color('#f6fbff')))
             font=QFont('Segoe UI',max(12,min(22,w//10)));font.setBold(True);p.setFont(font)
             p.drawText(self.rect().adjusted(13,40,-13,-18), Qt.TextFlag.TextWordWrap|Qt.AlignmentFlag.AlignBottom,self.game['title'])
         p.end()
@@ -234,22 +243,45 @@ class EmulatorDialog(QDialog):
         bar=QHBoxLayout();outer.addLayout(bar)
         bar.addWidget(click('Detect from extracted folder…',self.autodetect))
         bar.addStretch()
+        bar.addWidget(click('Auto-configure RetroAchievements',self.configure_ra_all))
         sc=QScrollArea();sc.setWidgetResizable(True);outer.addWidget(sc)
         body=QWidget();sc.setWidget(body);lay=QVBoxLayout(body)
         for e in EMULATORS:
             row=QHBoxLayout();lay.addLayout(row)
-            n=label(e.name+('  · experimental' if e.status!='supported' else ''));n.setFixedWidth(180);row.addWidget(n)
+            n=label(e.name+('  · experimental' if e.status!='supported' else ''));n.setFixedWidth(210);row.addWidget(n)
             edit=QLineEdit(self.settings.values['emulators'].get(e.key,''));edit.setPlaceholderText(e.executable)
             row.addWidget(edit,1);self.edits[e.key]=edit
             row.addWidget(click('Browse…',lambda checked=False,key=e.key:self.browse(key)))
             row.addWidget(click('Open',lambda checked=False,key=e.key:self.open_gui(key)))
+            if e.key in RA_SUPPORTED:
+                row.addWidget(click('Enable RA',lambda checked=False,key=e.key:self.configure_ra_one(key)))
+        self.ra_autoconfigure=QCheckBox('Keep RetroAchievements enabled for detected emulators on future launches')
+        self.ra_autoconfigure.setChecked(bool(self.settings.values.get('ra_auto_configure',False)))
+        outer.addWidget(self.ra_autoconfigure)
+        outer.addWidget(label('Supports DuckStation, PCSX2, PPSSPP and Dolphin. GameShelf enables their native feature; '
+                              'you must sign in through each emulator using its Achievements menu. '
+                              'Close the emulator before changing its settings.', 'muted',True))
+        outer.addWidget(label('Xbox One · WinDurango compatibility layer','section'))
+        outer.addWidget(label('WinDurango has no standalone launcher. The bundled WinDurango.Common.dll is a detection marker, not an executable. Add a prepared game .exe from its Mount folder; Xbox One ISO/XVC files are not directly bootable. Follow the official game registration/setup instructions before launching.','muted',True))
         outer.addWidget(label('Kyty PS5 launching','section'))
         outer.addWidget(label('PLAY launches the selected game directly through kyty_emulator.exe, as in GameShelf v0.4. To open Kyty’s library manually, use the Open button above.','muted',True))
         outer.addWidget(label('The frontend will not alter emulator firmware, system settings, save files or game data.','muted',True))
         buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.save);buttons.rejected.connect(self.reject);outer.addWidget(buttons)
+    def ra_path(self,key):
+        return executable_path(self.edits[key].text().strip()) if self.edits[key].text().strip() else BASE/'__emulator_not_configured__'
+    def configure_ra_one(self,key):
+        result=configure_ra(key,self.ra_path(key))
+        title='RetroAchievements · '+RA_SUPPORTED[key][0]
+        content=result.message+(f'\nSettings: {result.config_path}' if result.config_path else '')
+        (QMessageBox.information if result.status in ('enabled','already_enabled') else QMessageBox.warning)(self,title,content)
+    def configure_ra_all(self):
+        paths={key:str(self.ra_path(key)) for key in RA_SUPPORTED}
+        results=configure_ra_all(paths)
+        message='\n'.join(f'{RA_SUPPORTED[r.key][0]}: {r.status.replace("_"," ")} - {r.message}' for r in results)
+        QMessageBox.information(self,'RetroAchievements configuration',message)
     def browse(self,key):
-        chosen,_=QFileDialog.getOpenFileName(self,'Choose emulator executable',str(BASE),'Executable (*.exe);;All files (*)')
+        chosen,_=QFileDialog.getOpenFileName(self,'Choose WinDurango runtime' if key=='windurango' else 'Choose emulator executable',str(BASE),'WinDurango runtime (WinDurango.Common.dll);;DLL files (*.dll)' if key=='windurango' else 'Executable (*.exe);;All files (*)')
         if chosen:self.edits[key].setText(chosen)
     def autodetect(self):
         directory=QFileDialog.getExistingDirectory(self,'Select a folder holding both extracted archives',str(BASE))
@@ -261,6 +293,10 @@ class EmulatorDialog(QDialog):
         path=executable_path(self.edits[key].text().strip())
         if not path.is_file():
             QMessageBox.warning(self,'Missing executable','Choose an existing executable first.');return
+        if key=='windurango':
+            from windurango_support import SUPPORT_URL
+            QMessageBox.information(self,'WinDurango setup','WinDurango is a compatibility DLL layer, not a standalone emulator.\n\nCopy/install the DLLs as required by its official guide, register compatible games in Windows, then select their prepared .exe in GameShelf.\n\n'+SUPPORT_URL)
+            return
         import subprocess
         try:
             if key=='kyty':
@@ -271,7 +307,86 @@ class EmulatorDialog(QDialog):
     def save(self):
         self.settings.values['emulators']={k:e.text().strip() for k,e in self.edits.items() if e.text().strip()}
         self.settings.values['kyty_launch_mode']='direct'  # Keep old profiles from switching PLAY to Kyty's library.
+        self.settings.values['ra_auto_configure']=self.ra_autoconfigure.isChecked()
         self.settings.save();self.accept()
+
+
+def prepare_windurango_game(game_executable: str, configured_runtime: str, parent=None) -> bool:
+    """Explicitly approved game-folder DLL deployment; no silent AppX changes."""
+    try:
+        plan=preparation_plan(game_executable, configured_runtime)
+    except (OSError, ValueError) as exc:
+        QMessageBox.warning(parent,'WinDurango preparation unavailable',str(exc))
+        return False
+    # WinDurango requires EmbeddedXvd inside the folder holding the executable.
+    # If it is immediately above Mount, offer an explicit, non-overwriting move.
+    moved_embedded=None
+    try:
+        relocation=embedded_xvd_relocation_plan(game_executable)
+    except (OSError, ValueError) as exc:
+        QMessageBox.warning(parent,'EmbeddedXvd location conflict',str(exc))
+        return False
+    if relocation:
+        source, target=relocation
+        choice=QMessageBox.question(
+            parent,'Place EmbeddedXvd in the game folder',
+            f'WinDurango requires EmbeddedXvd next to the game executable.\n\n'
+            f'Current: {source}\nRequired: {target}\n\n'
+            'Move this folder to the required location?\n'
+            'This moves the original folder on the same drive; existing files will not be overwritten.\n'
+            'Close the game before proceeding. GameShelf will not change Windows registration.',
+            QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if choice!=QMessageBox.StandardButton.Yes:
+            return False
+        try:
+            moved_embedded=relocate_embedded_xvd(game_executable)
+            plan=preparation_plan(game_executable,configured_runtime)
+        except (OSError,ValueError,RuntimeError) as exc:
+            QMessageBox.critical(parent,'EmbeddedXvd relocation failed',str(exc))
+            return False
+    names=', '.join(source.name for source,_ in plan.pending)
+    if plan.pending:
+        choice=QMessageBox.question(
+            parent,'Prepare Xbox One game for WinDurango',
+            f'Game folder: {plan.executable.parent}\n\n'
+            f'Copy {len(plan.pending)} missing DLLs into the game folder?\n'
+            f'Existing DLLs ({len(plan.already_present)}) will NOT be overwritten.\n\n'
+            f'Files: {names}\n\n'
+            f'Game-specific EmbeddedXvd dependencies available: {len(plan.game_specific_pending)}\n\n'
+            'The game may still need Windows Developer Mode, AppX registration and '
+            'game-specific EmbeddedXvd dependencies. This does not guarantee compatibility.',
+            QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if choice!=QMessageBox.StandardButton.Yes:
+            return False
+        try:
+            copied=apply_preparation_plan(plan)
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.critical(parent,'WinDurango preparation failed',str(exc))
+            return False
+    else:
+        copied=()
+    if plan.manifest:
+        cmd=registration_command(plan.manifest)
+        msg=QMessageBox(parent)
+        msg.setWindowTitle('WinDurango runtime copied')
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(f'{len(copied)} WinDurango DLLs installed.\n'
+                    f'EmbeddedXvd: {"moved into game folder" if moved_embedded else "unchanged"}.\n\n'
+                    'If this app is not yet registered, enable Windows Developer Mode '
+                    'and run the following in PowerShell (you must choose to do this yourself):\n\n'+cmd)
+        copy=msg.addButton('Copy registration command',QMessageBox.ButtonRole.ActionRole)
+        msg.addButton('Close',QMessageBox.ButtonRole.AcceptRole)
+        msg.exec()
+        if msg.clickedButton()==copy:QApplication.clipboard().setText(cmd)
+    else:
+        QMessageBox.information(parent,'WinDurango runtime copied',
+            f'{len(copied)} DLLs installed. EmbeddedXvd: {"moved into game folder" if moved_embedded else "unchanged"}. No AppxManifest.xml was found near the executable. '
+            'If this is an Xbox One UWP game, it may still need app registration, '
+            'Developer Mode and game-specific EmbeddedXvd DLLs.\n\n'
+            f'Official guide: {SUPPORT_URL}')
+    return True
 
 
 class GameDialog(QDialog):
@@ -289,13 +404,25 @@ class GameDialog(QDialog):
         form.addRow('Game path / Vita title ID',browse_row)
         form.addRow('Platform',self.platform)
         form.addRow('Emulator',self.emulator)
-        form.addRow(label('Vita3K uses installed title IDs. PS1: CUE/CHD; PS2: ISO/CHD; PSP: ISO/CSO. PS3/PS5 game folders are supported.','muted',True))
+        self.windurango_prepare=click('Prepare WinDurango Game…',self.prepare_windurango)
+        form.addRow('',self.windurango_prepare)
+        self.windurango_prepare.setVisible(self.emulator.currentData()=='windurango')
+        self.emulator.currentIndexChanged.connect(lambda:self.windurango_prepare.setVisible(self.emulator.currentData()=='windurango'))
+        form.addRow(label('Vita3K: installed title IDs. Dreamcast: GDI/CDI/CHD/CUE. N64: Z64/N64/V64/ZIP. Xbox One / WinDurango: already prepared game executable (.exe), not ISO/XVC.','muted',True))
         buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.validate);buttons.rejected.connect(self.reject);form.addRow(buttons)
         self.platform.currentIndexChanged.connect(self.suggest_emulator)
         if existing:
             idx=self.platform.findData(existing['platform']);self.platform.setCurrentIndex(idx)
             idx=self.emulator.findData(existing['emulator']);self.emulator.setCurrentIndex(idx)
+    def prepare_windurango(self):
+        if self.emulator.currentData()!='windurango':return
+        parent=self.parent()
+        configured=(parent.settings.values.get('emulators',{}).get('windurango')
+                    if parent is not None and hasattr(parent,'settings') else None)
+        marker=executable_path(configured) if configured else BASE/'Emulators'/'WinDurango'/'WinDurango.Common.dll'
+        prepare_windurango_game(self.path.text().strip(),str(marker),self)
+
     def choose_file(self):
         chosen,_=QFileDialog.getOpenFileName(self,'Choose game file',str(BASE))
         if chosen:
@@ -318,6 +445,11 @@ class GameDialog(QDialog):
             QMessageBox.warning(self,'Platform mismatch','Choose an emulator compatible with the selected platform.');return
         if self.emulator.currentData()!='vita3k' and not Path(value).exists():
             QMessageBox.warning(self,'Missing file','The selected game path does not exist.');return
+        if self.emulator.currentData()=='windurango':
+            try:
+                validate_game_path(value)
+            except ValueError as exc:
+                QMessageBox.warning(self,'WinDurango preparation required',str(exc));return
         self.accept()
     def game_data(self):
         return dict(title=self.title.text().strip(),path=self.path.text().strip(),platform=self.platform.currentData(),emulator=self.emulator.currentData())
@@ -379,14 +511,70 @@ class PS3GameSettingsDialog(QDialog):
         return self.arguments.text().strip()
 
 
+class DiscManagerDialog(QDialog):
+    """Attach ordered disc images to a supported multi-disc library entry."""
+    def __init__(self,game,parent=None):
+        super().__init__(parent)
+        self.game_platform=game['platform']
+        self.setWindowTitle('Manage Discs · '+game['title'])
+        self.resize(760,420)
+        layout=QVBoxLayout(self)
+        layout.addWidget(label('These discs remain separate files, but appear as one game in GameShelf. The Switch Disc button remembers the next boot disc.', 'muted', True))
+        self.paths=QListWidget()
+        self.paths.addItem(game['path'])
+        discs=game.get('discs',[])
+        for entry in discs:
+            if entry['path'].casefold()!=game['path'].casefold():self.paths.addItem(entry['path'])
+        layout.addWidget(self.paths,1)
+        row=QHBoxLayout()
+        row.addWidget(click('+ Add discs',self.add_paths))
+        row.addWidget(click('Remove selected',self.remove_selected))
+        row.addWidget(click('Move up',self.move_up))
+        row.addWidget(click('Move down',self.move_down))
+        layout.addLayout(row)
+        layout.addWidget(label('Disc 1 must be the original game path. Only move or remove the other discs.', 'muted', True))
+        actions=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel)
+        actions.accepted.connect(self.accept)
+        actions.rejected.connect(self.reject)
+        layout.addWidget(actions)
+    def all_paths(self):
+        return [self.paths.item(i).text() for i in range(self.paths.count())]
+    def add_paths(self):
+        chosen,_=QFileDialog.getOpenFileNames(self,'Add disc images',str(Path(self.paths.item(0).text()).parent),
+                                        'Supported disc images (' + ' '.join('*'+ext for ext in sorted(DISC_IMAGE_EXTS[self.game_platform])) + ')')
+        known={path.casefold() for path in self.all_paths()}
+        for path in chosen:
+            if path.casefold() not in known:
+                self.paths.addItem(path);known.add(path.casefold())
+    def remove_selected(self):
+        row=self.paths.currentRow()
+        if row>0:self.paths.takeItem(row)
+    def move_up(self):
+        row=self.paths.currentRow()
+        if row>1:
+            item=self.paths.takeItem(row);self.paths.insertItem(row-1,item);self.paths.setCurrentRow(row-1)
+    def move_down(self):
+        row=self.paths.currentRow()
+        if 0<row<self.paths.count()-1:
+            item=self.paths.takeItem(row);self.paths.insertItem(row+1,item);self.paths.setCurrentRow(row+1)
+    def accept(self):
+        if self.paths.count()<2:
+            QMessageBox.warning(self,'Missing discs','Add at least one extra disc before saving.');return
+        super().accept()
+
+
 class Main(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f'GameShelf v{APP_VERSION} · Your Games, One Library');self.resize(1500,920)
+        self.setWindowIcon(load_icon())
         self.setMinimumSize(900,600)
         self.settings=Settings();self.library=Library();self.controller=Controller()
+        self.theme=normalize_theme(self.settings.values.get('theme'))
+        activate_theme(self.theme)
+        QApplication.instance().setStyleSheet(theme_stylesheet(STYLE, self.theme))
         self.selected=None;self.filter='all';self.search='';self.big_index=0;self.big_games=[]
-        self.sessions={};self.session_monitors={};self._game_input_paused=False;self.scanner=None;self.title_worker=None;self.title_scan_again=False;self.title_changed=0
+        self.sessions={};self.session_monitors={};self.session_disc_playlist=set();self._game_input_paused=False;self.scanner=None;self.title_worker=None;self.title_scan_again=False;self.title_changed=0
         self.root=QStackedWidget();self.root.setObjectName('root');self.setCentralWidget(self.root)
         self.desktop=self.make_desktop();self.big=self.make_big()
         self.root.addWidget(self.desktop);self.root.addWidget(self.big)
@@ -429,19 +617,67 @@ class Main(QMainWindow):
                     self.settings.values['emulators'][key]=path
                     updated=True
         if updated:self.settings.save()
+        if self.settings.values.get('ra_auto_configure'):
+            # Opt-in: restore enable flags for emulators that have already generated configs.
+            # No authentication credentials are copied or written by GameShelf.
+            configure_ra_all({key:str(executable_path(self.settings.values['emulators'].get(key,'')))
+                              for key in RA_SUPPORTED if self.settings.values['emulators'].get(key)})
         self.update_summary()
         self.migrate_legacy_platforms()
         QTimer.singleShot(1200,self.resolve_title_ids)
+
+    def make_theme_combo(self):
+        combo=QComboBox()
+        combo.setToolTip('Theme is saved and applies to both Desktop and Big Picture')
+        for key in THEME_KEYS:
+            combo.addItem(THEMES[key]['label'], key)
+        combo.setCurrentIndex(combo.findData(self.theme))
+        combo.currentIndexChanged.connect(lambda _index, widget=combo: self.change_theme(widget.currentData()))
+        return combo
+
+    def update_footer_theme(self):
+        if hasattr(self,'big_footer'):
+            self.big_footer.setStyleSheet(
+                f"font-size: 15px; color:{theme_color('#becbe0')}; padding:12px; "
+                f"background:{theme_color('#172131')}; border-radius:12px;")
+
+    def change_theme(self, selected):
+        key=normalize_theme(selected)
+        if key==self.theme:
+            return
+        self.theme=activate_theme(key)
+        self.settings.values['theme']=key
+        self.settings.save()
+        app=QApplication.instance()
+        if app:
+            app.setStyleSheet(theme_stylesheet(STYLE, key))
+        for combo_name in ('theme_combo','big_theme_combo'):
+            combo=getattr(self,combo_name,None)
+            if combo is not None and combo.currentData()!=key:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(combo.findData(key))
+                combo.blockSignals(False)
+        self.update_footer_theme()
+        if hasattr(self,'scroller'): self.scroller.viewport().update()
+        if hasattr(self,'bigscroll'): self.bigscroll.viewport().update()
+        if hasattr(self,'details_poster'): self.details_poster.update()
 
     def make_desktop(self):
         w=QWidget();w.setObjectName('desktop');outer=QHBoxLayout(w);outer.setContentsMargins(0,0,0,0);outer.setSpacing(0)
         side=QFrame();side.setObjectName('sidebar');side.setFixedWidth(248);outer.addWidget(side)
         sl=QVBoxLayout(side);sl.setContentsMargins(16,28,13,20);sl.setSpacing(13)
-        sl.addWidget(label('◈  GameShelf','brand'))
+        brand_row=QHBoxLayout()
+        brand_icon=QLabel(); brand_icon.setPixmap(load_icon().pixmap(38,38))
+        brand_row.addWidget(brand_icon)
+        brand_row.addWidget(GameShelfWordmark(173, 38))
+        brand_row.addStretch(1)
+        sl.addLayout(brand_row)
         sl.addWidget(label('YOUR UNIFIED GAME LIBRARY','muted'))
         sl.addSpacing(14)
         self.nav=QListWidget()
         self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.nav.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        enable_smooth_wheel(self.nav)
         self.nav.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.nav.setWordWrap(False)
         sl.addWidget(self.nav,1)
@@ -470,6 +706,9 @@ class Main(QMainWindow):
                 self.nav.addItem(item)
         self.nav.setCurrentRow(0);self.nav.currentItemChanged.connect(self.change_filter)
         sl.addWidget(click('⚙  Emulator Manager',self.manage_emulators))
+        sl.addWidget(label('APPEARANCE','muted'))
+        self.theme_combo=self.make_theme_combo()
+        sl.addWidget(self.theme_combo)
         self.startup_btn=click('',self.toggle_startup_mode)
         sl.addWidget(self.startup_btn)
         self.update_startup_label()
@@ -484,6 +723,7 @@ class Main(QMainWindow):
         top.addWidget(click('ID → Names',self.resolve_title_ids))
         top.addWidget(click('↓ Missing Covers',self.download_missing_covers))
         top.addWidget(click('+ Add Game',self.add_game))
+        top.addWidget(click('Merge Discs',self.merge_multi_discs))
         top.addWidget(click('Import Folder',self.import_folder,True))
         search=QHBoxLayout();cl.addLayout(search)
         self.searchbar=QLineEdit();self.searchbar.setPlaceholderText('⌕  Search games, platforms, and emulators…');self.searchbar.textChanged.connect(self.set_search)
@@ -503,6 +743,7 @@ class Main(QMainWindow):
         self.details_scroller=QScrollArea()
         self.details_scroller.setObjectName('detailsScroll')
         self.details_scroller.setWidgetResizable(True)
+        enable_smooth_wheel(self.details_scroller)
         self.details_scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.details_scroller.setMinimumWidth(300)
         detail=QFrame()
@@ -525,14 +766,22 @@ class Main(QMainWindow):
         dl.addWidget(self.fav_btn)
         self.find_cover_btn=click('Find Online Cover…',self.find_cover)
         self.cover_btn=click('Change Cover Art…',self.change_cover)
+        self.discs_btn=click('💿 Manage Discs…',self.manage_discs)
+        self.swap_btn=click('⇄  Switch Disc',self.switch_disc)
         self.ps3_settings_btn=click('⚙  PS3 Game Settings…',self.edit_ps3_settings)
         self.ps3_settings_btn.setToolTip('Set RPCS3 command-line arguments for this particular game')
         dl.addWidget(self.ps3_settings_btn)
+        dl.addWidget(self.discs_btn)
+        dl.addWidget(self.swap_btn)
         self.edit_btn=click('Edit Game…',self.edit_game)
+        self.windurango_prepare_btn=click('Prepare WinDurango Game…',self.prepare_selected_windurango)
+        self.windurango_diagnose_btn=click('Diagnose WinDurango Launch…',self.diagnose_selected_windurango)
         self.remove_btn=click('Remove from Library',self.remove_game)
         dl.addWidget(self.find_cover_btn)
         dl.addWidget(self.cover_btn)
         dl.addWidget(self.edit_btn)
+        dl.addWidget(self.windurango_prepare_btn)
+        dl.addWidget(self.windurango_diagnose_btn)
         dl.addWidget(self.remove_btn)
         dl.addStretch(1)
         self.details_scroller.setWidget(detail)
@@ -548,7 +797,9 @@ class Main(QMainWindow):
         w=QWidget();w.setObjectName('bigpicture');lay=QVBoxLayout(w)
         lay.setContentsMargins(46,28,46,30);lay.setSpacing(15)
         bar=QHBoxLayout();lay.addLayout(bar)
-        bar.addWidget(label('◈  GameShelf','bigTitle'));bar.addStretch(1)
+        big_icon=QLabel();big_icon.setPixmap(load_icon().pixmap(56,56))
+        bar.addWidget(big_icon)
+        bar.addWidget(GameShelfWordmark(330, 58));bar.addStretch(1)
         bar.addWidget(click('All',lambda:self.big_filter('all')))
         bar.addWidget(click('Favourites',lambda:self.big_filter('favorites')))
         # Console filters are available directly in fullscreen mode, not only
@@ -564,9 +815,16 @@ class Main(QMainWindow):
                 self.big_system.addItem(f'{family.title()} · {PLATFORMS[key]}',key)
         self.big_system.currentIndexChanged.connect(self.on_big_system)
         bar.addWidget(self.big_system)
+        self.big_theme_combo=self.make_theme_combo()
+        self.big_theme_combo.setMinimumWidth(156)
+        self.big_theme_combo.setToolTip('Change GameShelf theme')
+        bar.addWidget(self.big_theme_combo)
         self.big_ps3_settings_btn=click('⚙ PS3 Settings',self.edit_ps3_settings)
         self.big_ps3_settings_btn.setVisible(False)
         bar.addWidget(self.big_ps3_settings_btn)
+        self.big_switch_btn=click('⇄ Switch Disc',self.switch_disc)
+        self.big_switch_btn.setVisible(False)
+        bar.addWidget(self.big_switch_btn)
         bar.addWidget(click('Desktop  ·  F11',self.leave_big))
         self.big_sub=label('SELECT A GAME  ·  PRESS A TO PLAY','muted');lay.addWidget(self.big_sub)
         self.bigscroll,self.big_model=make_game_view(large=True)
@@ -575,7 +833,7 @@ class Main(QMainWindow):
         lay.addWidget(self.bigscroll,1)
         self.big_footer=label('', 'muted',True)
         self.update_gamepad_footer()
-        self.big_footer.setStyleSheet('font-size: 15px; color:#becbe0; padding:12px; background:#172131; border-radius:12px;')
+        self.update_footer_theme()
         lay.addWidget(self.big_footer)
         return w
 
@@ -645,6 +903,13 @@ class Main(QMainWindow):
         menu.addAction('▶  Play',lambda:self.launch_selected(game['id']))
         if game['platform']=='ps3':
             menu.addAction('⚙  PS3 Game Settings…',self.edit_ps3_settings)
+        if game['platform'] in DISC_PLATFORMS:
+            menu.addAction('💿 Manage Discs…',self.manage_discs)
+            if game.get('disc_count',1)>1:
+                menu.addAction('⇄ Switch Disc',self.switch_disc)
+        if game['emulator']=='windurango':
+            menu.addAction('Prepare WinDurango Game…',self.prepare_selected_windurango)
+            menu.addAction('Diagnose WinDurango Launch…',self.diagnose_selected_windurango)
         menu.addAction('Edit Game…',self.edit_game)
         menu.exec(self.scroller.viewport().mapToGlobal(position))
 
@@ -663,6 +928,7 @@ class Main(QMainWindow):
             self.selected=game['id']
             self.big_sub.setText(f'{len(self.big_games)} GAMES     ·     {game["title"].upper()}')
             self.big_ps3_settings_btn.setVisible(game['platform']=='ps3')
+            self.big_switch_btn.setVisible(game.get('disc_count',1)>1)
     def refresh(self):
         games=self.items()
         self.counter.setText(f'{len(games)} game'+('' if len(games)==1 else 's'))
@@ -706,13 +972,24 @@ class Main(QMainWindow):
                 btn.setEnabled(False)
             self.ps3_settings_btn.setVisible(False)
             self.big_ps3_settings_btn.setVisible(False)
+            self.big_switch_btn.setVisible(False)
+            self.discs_btn.setVisible(False)
+            self.swap_btn.setVisible(False)
+            self.windurango_prepare_btn.setVisible(False)
+            self.windurango_diagnose_btn.setVisible(False)
             return
         for btn in (self.play_btn,self.fav_btn,self.find_cover_btn,self.cover_btn,self.edit_btn,self.remove_btn):
             btn.setEnabled(True)
+        self.windurango_prepare_btn.setVisible(game['emulator']=='windurango')
+        self.windurango_diagnose_btn.setVisible(game['emulator']=='windurango')
         self.ps3_settings_btn.setVisible(game['platform']=='ps3')
         self.big_ps3_settings_btn.setVisible(game['platform']=='ps3')
+        self.discs_btn.setVisible(game['platform'] in DISC_PLATFORMS)
+        self.swap_btn.setVisible(game.get('disc_count',1)>1)
+        self.big_switch_btn.setVisible(game.get('disc_count',1)>1)
         self.details_title.setText(game['title'])
-        self.details_info.setText(f"{PLATFORMS[game['platform']]}  ·  {BY_KEY[game['emulator']].name}\nPlaytime: {game['seconds_played']//3600}h {(game['seconds_played']%3600)//60}m")
+        disc_details=(f"\n{game['disc_count']} discs · Selected Disc {game['selected_disc']}" if game.get('disc_count',1)>1 else '')
+        self.details_info.setText(f"{PLATFORMS[game['platform']]}  ·  {BY_KEY[game['emulator']].name}\nPlaytime: {game['seconds_played']//3600}h {(game['seconds_played']%3600)//60}m"+disc_details)
         path=game['path']
         self.details_path.setText('Location: '+self.details_path.fontMetrics().elidedText(Path(path).name or path,Qt.TextElideMode.ElideMiddle,246))
         self.details_path.setToolTip(path)
@@ -743,6 +1020,7 @@ class Main(QMainWindow):
         else:
             self.big_index=0
             self.big_ps3_settings_btn.setVisible(False)
+            self.big_switch_btn.setVisible(False)
             self.big_sub.setText('No games in this collection. Import some games in desktop mode.')
         self.big_dirty=False
     def big_choose(self,identifier):
@@ -861,6 +1139,7 @@ class Main(QMainWindow):
                 self.library.add_playtime(key, int(max(0, time.monotonic()-start)))
             del self.sessions[key]
             self.session_monitors.pop(key, None)
+            getattr(self,'session_disc_playlist',set()).discard(key)
             if log_path is not None and code not in (None, 0):
                 try:
                     with Path(log_path).open('rb') as f:
@@ -871,6 +1150,20 @@ class Main(QMainWindow):
                 QMessageBox.warning(self, 'Kyty exited with an error',
                     f'Exit code: 0x{code & 0xffffffff:08X}\n'
                     f'Full launch log: {log_path}\n\nLast output:\n{tail}')
+            elif code not in (None,0) and self.library.get(key) and self.library.get(key)['emulator']=='windurango':
+                failure=status_name(code)
+                self.statusBar().showMessage('WinDurango game failed to start: '+failure,10000)
+                answer=QMessageBox.question(self,'WinDurango startup failed',
+                    f'The Xbox One game process exited with {failure}.\n\n'
+                    'The WinDurango DLLs being present does not confirm game readiness.\n'
+                    'Check EmbeddedXvd dependencies, Windows AppX registration, '
+                    'and the version supported by WinDurango.\n\n'
+                    'Run the read-only diagnosis now?',
+                    QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes)
+                if answer==QMessageBox.StandardButton.Yes:
+                    self.selected=key
+                    self.diagnose_selected_windurango()
             else:
                 self.statusBar().showMessage('Game closed. Playtime recorded.' if track else 'Kyty launcher closed.', 6000)
             self.update_game_in_views(key)
@@ -981,9 +1274,10 @@ class Main(QMainWindow):
         for title,platform,path in games:
             emulator=next(e.key for e in EMULATORS if platform in e.platforms)
             if self.library.add(title,platform,emulator,path):count+=1
+        merged=self.library.auto_merge_discs()
         self.refresh()
         self.resolve_title_ids()
-        QMessageBox.information(self,'Import complete',f'Scanned {len(games)} entries and added {count} new games.\n\nDuplicate game paths were skipped.')
+        QMessageBox.information(self,'Import complete',f'Scanned {len(games)} entries and added {count} new games.\nMerged {len(merged)} numbered multi-disc sets.\n\nDuplicate game paths were skipped.')
     def add_game(self):
         dialog=GameDialog(parent=self)
         if dialog.exec():
@@ -1016,6 +1310,104 @@ class Main(QMainWindow):
             self.update_game_in_views(identifier)
             self.statusBar().showMessage('Saved PS3 launch arguments for '+game['title'],5000)
             if self.root.currentWidget()==self.big:self.focus_big()
+
+    def current_game_for_action(self):
+        identifier=self.selected
+        if self.root.currentWidget()==self.big and self.big_games:
+            identifier=self.big_games[self.big_index]['id']
+        return self.library.get(identifier) if identifier else None
+
+    def merge_multi_discs(self):
+        try:
+            merged=self.library.auto_merge_discs()
+            self.refresh()
+            if merged:
+                QMessageBox.information(self,'Multi-disc library',
+                    f'Merged {len(merged)} game sets into single entries.\n\n'
+                    'All original disc image files are untouched; favourites and playtime were preserved.')
+            else:
+                QMessageBox.information(self,'Multi-disc library',
+                    'No unambiguous numbered disc sets found. Use Manage Discs to add discs manually.')
+        except Exception as exc:
+            QMessageBox.warning(self,'Merge failed',str(exc))
+
+    def manage_discs(self):
+        game=self.current_game_for_action()
+        if not game or game['platform'] not in DISC_PLATFORMS:return
+        if game['id'] in self.sessions:
+            QMessageBox.information(self,'Game running','Close the emulator before editing the disc list.')
+            return
+        dialog=DiscManagerDialog(game,self)
+        if dialog.exec():
+            try:
+                self.library.set_discs(game['id'],dialog.all_paths())
+                self.refresh()
+            except Exception as exc:QMessageBox.warning(self,'Cannot save discs',str(exc))
+
+    def switch_disc(self):
+        game=self.current_game_for_action()
+        if not game or game.get('disc_count',1)<2:return
+        number=next_disc_number(game['discs'],int(game['selected_disc']))
+        next_image=next(d['path'] for d in game['discs'] if d['disc_number']==number)
+        if not Path(next_image).is_file():
+            QMessageBox.warning(self,'Missing disc',f'Disc {number} is missing:\n{next_image}')
+            return
+        running=game['id'] in self.sessions
+        if not running:
+            self.library.choose_disc(game['id'],number)
+            self.update_game_in_views(game['id'])
+            QMessageBox.information(self,'Disc selected',
+                f'Disc {number} is selected for the next launch.\n\n'
+                + ('DuckStation starts the selected disc directly; Disc 1 starts the complete M3U playlist.'
+                   if game['emulator']=='duckstation' else f'{BY_KEY[game["emulator"]].name} will boot the selected disc image on its next launch.'))
+            return
+        if game['emulator']=='duckstation':
+            if game['id'] not in self.session_disc_playlist:
+                QMessageBox.warning(self,'Playlist needed',
+                    'Live Next Disc works when DuckStation was launched from the M3U playlist (start on Disc 1).\n'
+                    'This session was started from a single disc. Use DuckStation’s own Change Disc → From File menu.')
+                return
+            if not self.settings.values.get('duckstation_f8_configured',False):
+                reply=QMessageBox.question(self,'Configure DuckStation once',
+                    'In DuckStation, assign the F8 key to Settings → Hotkeys → Switch to Next Disc.\n\n'
+                    'After configuring that hotkey, click Yes to send F8 to the running emulator.\n'
+                    'This requires the game to have launched through its multi-disc M3U playlist.',
+                    QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if reply!=QMessageBox.StandardButton.Yes:return
+                self.settings.values['duckstation_f8_configured']=True
+                self.settings.save()
+            proc=self.sessions[game['id']][0]
+            monitor=self.session_monitors.get(game['id'])
+            pids={proc.pid}
+            if monitor:
+                pids.update(monitor.process_ids())
+            sent,message=send_duckstation_next_disc(pids)
+            if sent:
+                self.library.choose_disc(game['id'],number)
+                self.update_game_in_views(game['id'])
+                self.statusBar().showMessage(message,6000)
+            else:
+                QMessageBox.warning(self,'Disc hotkey not sent',message)
+        else:
+            # No verified GameShelf live-swap interface for these emulators.
+            # Keep the emulator and gameplay running; never silently restart.
+            instructions={
+                'pcsx2': 'In PCSX2 open System → Change Disc → ISO Selector, choose the image, and resume the game.',
+                'flycast': 'In standalone Flycast, use the emulator’s quick menu/disc controls to change the loaded disc. Flycast’s RetroArch-core M3U integration does not apply to this bundled standalone build.',
+                'xenia': 'Xenia cannot load M3U playlists. Some Xbox 360 games handle disc transitions internally. If your build supports opening the next image while the game is active, change it there. Otherwise save in-game, close Xenia, select the disc in GameShelf, and start it again.',
+            }
+            QApplication.clipboard().setText(next_image)
+            reply=QMessageBox.question(self, f'{BY_KEY[game["emulator"]].name}: Change Disc',
+                f'Disc {number} image path copied to clipboard:\n{next_image}\n\n'
+                + instructions.get(game['emulator'], 'Use the emulator’s native disc-change controls where available.')
+                + '\n\nClick Yes only if you successfully changed discs in the emulator. '
+                + 'No keeps GameShelf’s current disc selection unchanged.',
+                QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if reply==QMessageBox.StandardButton.Yes:
+                self.library.choose_disc(game['id'], number)
+                self.update_game_in_views(game['id'])
 
     def remove_game(self):
         game=self.library.get(self.selected) if self.selected else None
@@ -1061,6 +1453,38 @@ class Main(QMainWindow):
             if self.root.currentWidget()==self.big:self.focus_big()
     def toggle_favorite(self):
         if self.selected:self.favorite_id(self.selected)
+    def prepare_selected_windurango(self):
+        game=self.library.get(self.selected) if self.selected else None
+        if not game or game['emulator']!='windurango':return
+        configured=self.settings.values.get('emulators',{}).get('windurango')
+        marker=executable_path(configured) if configured else BASE/'Emulators'/'WinDurango'/'WinDurango.Common.dll'
+        prepare_windurango_game(game['path'],str(marker),self)
+
+    def diagnose_selected_windurango(self):
+        game=self.library.get(self.selected) if self.selected else None
+        if not game or game['emulator']!='windurango':return
+        configured=self.settings.values.get('emulators',{}).get('windurango')
+        marker=executable_path(configured) if configured else BASE/'Emulators'/'WinDurango'/'WinDurango.Common.dll'
+        try:
+            report=create_diagnostic_report(game['path'],str(marker))
+        except Exception as exc:
+            report='WinDurango diagnosis failed: '+str(exc)
+        message=QMessageBox(self)
+        message.setIcon(QMessageBox.Icon.Information)
+        message.setWindowTitle('WinDurango launch diagnostics')
+        message.setText('Read-only preparation and Windows registration check complete.\n'
+                        'This is a diagnostic, not proof that the game is compatible.')
+        message.setDetailedText(report)
+        save=message.addButton('Save report…',QMessageBox.ButtonRole.ActionRole)
+        message.addButton('Close',QMessageBox.ButtonRole.AcceptRole)
+        message.exec()
+        if message.clickedButton()==save:
+            path,_=QFileDialog.getSaveFileName(self,'Save WinDurango diagnostic',
+                         'WinDurango_Diagnostic.txt','Text files (*.txt)')
+            if path:
+                try:Path(path).write_text(report,encoding='utf-8')
+                except OSError as exc:QMessageBox.warning(self,'Save failed',str(exc))
+
     def play_selected(self):
         if self.selected:self.launch_selected(self.selected)
     def launch_selected(self,identifier):
@@ -1076,20 +1500,47 @@ class Main(QMainWindow):
             # The PLAY action always starts the selected game. Never substitute Kyty's GUI,
             # including when upgrading a v0.5/v0.6 library with a saved native preference.
             # Keep stdout/stderr inherited just as in the known-working v0.4 launch path.
+            boot_path=game['path']
+            if game.get('disc_count',1)>1:
+                numbered=game['discs']
+                selected=int(game.get('selected_disc',1))
+                selected_path=next((d['path'] for d in numbered if d['disc_number']==selected),None)
+                if selected_path is None:raise ValueError('Selected disc is missing from this game')
+                if game['emulator']=='duckstation' and selected==1:
+                    boot_path=str(write_duckstation_playlist(identifier,
+                        [d['path'] for d in numbered],DATA/'playlists'))
+                else:
+                    boot_path=selected_path
             if game['platform']=='ps3' and game['emulator']=='rpcs3':
                 proc=launch(str(executable_path(executable)),game['emulator'],game['path'],
                             self.root.currentWidget()==self.big,kyty_mode='direct',
                             ps3_args=game.get('ps3_args',''))
             else:
-                proc=launch(str(executable_path(executable)),game['emulator'],game['path'],
+                proc=launch(str(executable_path(executable)),game['emulator'],boot_path,
                             self.root.currentWidget()==self.big,kyty_mode='direct')
             self.sessions[identifier]=(proc,time.monotonic(),True,None)
+            if Path(boot_path).suffix.lower()=='.m3u' and game['emulator']=='duckstation':
+                self.session_disc_playlist.add(identifier)
             self.session_monitors[identifier]=EmulatorProcessMonitor(proc)
             self._game_input_paused=True
             for shortcut in self.big_shortcuts:shortcut.setEnabled(False)
             if self.root.currentWidget()==self.big:self.update_gamepad_footer()
-            self.statusBar().showMessage(f'Launched {game["title"]} through {BY_KEY[game["emulator"]].name}')
-        except Exception as exc:QMessageBox.critical(self,'Could not launch game',str(exc))
+            if game['emulator']=='windurango':
+                self.statusBar().showMessage(f'Windows accepted AppX activation for {game["title"]}; gameplay not yet verified')
+            else:
+                self.statusBar().showMessage(f'Started {game["title"]} through {BY_KEY[game["emulator"]].name} (startup not verified)')
+        except Exception as exc:
+            if game['emulator']=='windurango' and isinstance(exc,ValueError) and 'not installed into this game folder' in str(exc):
+                answer=QMessageBox.question(self,'WinDurango setup required',
+                    'The WinDurango DLLs are not installed beside this game executable.\n\n'
+                    'Would you like to prepare this game using GameShelf’s bundled WinDurango runtime? '
+                    'No existing game files will be overwritten. Windows registration may still be needed.',
+                    QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if answer==QMessageBox.StandardButton.Yes:
+                    self.prepare_selected_windurango()
+                return
+            QMessageBox.critical(self,'Could not launch game',str(exc))
     def closeEvent(self,event):
         if self.scanner is not None and self.scanner.isRunning():
             if not self.scanner.wait(2000):
@@ -1106,9 +1557,12 @@ class Main(QMainWindow):
 
 
 def main():
+    # Windows taskbar identity must be set BEFORE QApplication exists.
+    register_windows_app_id()
     app=QApplication(sys.argv)
     app.setApplicationName('GameShelf')
-    app.setStyle('Fusion');app.setStyleSheet(STYLE)
+    app.setWindowIcon(load_icon())
+    app.setStyle('Fusion')
     w=Main()
     # Desktop starts by default; Big Picture requires explicit opt-in
     # through the startup setting or opening it manually with F11.

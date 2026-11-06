@@ -5,8 +5,8 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=[('assets/gameshelf.ico', 'assets'), ('assets/gameshelf.png', 'assets'), ('assets/gameshelf_wordmark.png', 'assets')],
+    hiddenimports=['cover_ui', 'cover_downloader'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -32,6 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets/gameshelf.ico'],
 )
 coll = COLLECT(
     exe,

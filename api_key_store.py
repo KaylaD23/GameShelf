@@ -1,4 +1,4 @@
-"""Keep the SteamGridDB token in the user's OS credential vault.
+"""Keep SteamGridDB and Giant Bomb API keys in the OS credential vault.
 
 Windows uses Credential Manager directly via ctypes (no extra dependency).
 Other OSes can use an already configured Python keyring backend. No plaintext
@@ -54,10 +54,10 @@ def _win_api():
     return dll
 
 
-def _read_windows() -> str:
+def _read_windows(target: str = _TARGET) -> str:
     api = _win_api()
     ptr = ctypes.POINTER(_CREDENTIALW)()
-    if not api.CredReadW(_TARGET, 1, 0, ctypes.byref(ptr)):
+    if not api.CredReadW(target, 1, 0, ctypes.byref(ptr)):
         if ctypes.get_last_error() == 1168:  # ERROR_NOT_FOUND
             return ''
         raise KeyStoreError('Cannot read the saved key from Windows Credential Manager.')
@@ -73,14 +73,14 @@ def _read_windows() -> str:
         api.CredFree(ctypes.cast(ptr, ctypes.c_void_p))
 
 
-def _write_windows(key: str) -> None:
+def _write_windows(key: str, target: str = _TARGET) -> None:
     raw = key.encode('ascii')
     if len(raw) > 2560:  # Windows generic credential blob limit.
         raise KeyStoreError('The API key is too long for Windows Credential Manager.')
     blob = ctypes.create_string_buffer(raw)
     cred = _CREDENTIALW()
     cred.Type = 1  # CRED_TYPE_GENERIC
-    cred.TargetName = _TARGET
+    cred.TargetName = target
     cred.UserName = 'GameShelf'
     cred.CredentialBlobSize = len(raw)
     cred.CredentialBlob = ctypes.cast(blob, ctypes.POINTER(ctypes.c_ubyte))
@@ -89,8 +89,8 @@ def _write_windows(key: str) -> None:
         raise KeyStoreError('Could not save the key in Windows Credential Manager.')
 
 
-def _delete_windows() -> None:
-    if not _win_api().CredDeleteW(_TARGET, 1, 0):
+def _delete_windows(target: str = _TARGET) -> None:
+    if not _win_api().CredDeleteW(target, 1, 0):
         if ctypes.get_last_error() != 1168:
             raise KeyStoreError('Could not delete the saved key from Windows Credential Manager.')
 
@@ -155,3 +155,63 @@ def forget_api_key() -> None:
         raise
     except Exception as exc:
         raise KeyStoreError('Unable to remove the saved API key.') from exc
+
+
+_GIANT_BOMB_TARGET = 'GameShelf/Giant Bomb API Key'
+_GIANT_BOMB_SERVICE = 'GameShelf - Giant Bomb'
+
+
+def _provider_info(provider: str) -> tuple[str, str, str, str]:
+    """Never let untrusted provider names become arbitrary vault item paths."""
+    if provider == 'SteamGridDB':
+        return _TARGET, _SERVICE, 'SteamGridDB', 'STEAMGRIDDB_API_KEY'
+    if provider == 'Giant Bomb':
+        return _GIANT_BOMB_TARGET, _GIANT_BOMB_SERVICE, 'Giant Bomb', 'GIANTBOMB_API_KEY'
+    raise KeyStoreError('This cover source does not use a saved API key.')
+
+
+def load_provider_key(provider: str) -> str:
+    """Load the corresponding provider key without disclosing it to other providers."""
+    target, service, username, envvar = _provider_info(provider)
+    if provider == 'SteamGridDB':
+        return load_api_key()
+    try:
+        if _on_windows():
+            token = _read_windows(target)
+        else:
+            token = _keyring_module().get_password(service, username) or ''
+    except Exception as exc:
+        if not os.environ.get(envvar):
+            raise KeyStoreError(f'Could not read {provider} key from the credential vault.') from exc
+        token = ''
+    return token or os.environ.get(envvar, '')
+
+
+def save_provider_key(provider: str, raw: str) -> str:
+    target, service, username, _ = _provider_info(provider)
+    if provider == 'SteamGridDB':
+        return save_api_key(raw)
+    key = normalise_api_key(raw)
+    try:
+        if _on_windows():
+            _write_windows(key, target)
+        else:
+            _keyring_module().set_password(service, username, key)
+    except Exception as exc:
+        raise KeyStoreError(f'Could not securely save the {provider} API key.') from exc
+    return key
+
+
+def forget_provider_key(provider: str) -> None:
+    target, service, username, _ = _provider_info(provider)
+    if provider == 'SteamGridDB':
+        return forget_api_key()
+    try:
+        if _on_windows():
+            _delete_windows(target)
+        else:
+            vault = _keyring_module()
+            if vault.get_password(service, username) is not None:
+                vault.delete_password(service, username)
+    except Exception as exc:
+        raise KeyStoreError(f'Could not remove the saved {provider} API key.') from exc
