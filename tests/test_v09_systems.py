@@ -8,7 +8,7 @@ from title_lookup import TitleResolver, parse_ps_titles_tsv, parse_ps5_param_jso
 
 
 def test_fifteen_emulators_and_separate_tabs():
-    assert len(EMULATORS)==15
+    assert len(EMULATORS)==19
     assert list(PLATFORMS).index('xbox360')==list(PLATFORMS).index('xbox')+1
     assert PLATFORMS['ps4']=='PlayStation 4'
     assert PLATFORMS['ps5']=='PlayStation 5'

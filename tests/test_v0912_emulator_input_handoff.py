@@ -219,7 +219,7 @@ def test_release_installer_tracks_new_monitor_and_dependencies():
     installer=(ROOT.parent/'update_existing_gameshelf.py').read_text(encoding='utf-8')
     assert '"emulator_lifecycle.py"' in installer
     assert '"requirements.txt"' in installer
-    assert 'RELEASE = "0.9.12"' in installer
+    assert 'RELEASE = "0.9.33"' in installer
     assert 'psutil>=5.9,<8' in (ROOT/'requirements.txt').read_text(encoding='utf-8')
     assert 'self.session_monitors[identifier]=EmulatorProcessMonitor(proc)' in MAIN
     assert 'self.controller.require_release()' in MAIN

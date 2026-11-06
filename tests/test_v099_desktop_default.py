@@ -61,7 +61,7 @@ def test_first_gui_launch_desktop_fallback_not_big():
 
 def test_launcher_version_matches_release():
     version=(APP/'VERSION.txt').read_text(encoding='utf-8').strip()
-    assert version == '0.9.12'
+    assert version == '0.9.33'
     assert f'title GameShelf v{version}' in (APP/'INSTALL_AND_RUN.bat').read_text(encoding='utf-8')
     from version_info import APP_VERSION, version_file_matches
     assert APP_VERSION == version and version_file_matches()

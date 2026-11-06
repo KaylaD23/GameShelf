@@ -7,8 +7,9 @@ from core import PLATFORMS, CONSOLE_GROUPS, EMULATORS
 def test_console_families_have_expected_order():
     assert CONSOLE_GROUPS == (
         ('PLAYSTATION', ('ps1','ps2','ps3','ps4','ps5','psp','vita')),
-        ('NINTENDO', ('gc','wii','wiiu','3ds','switch')),
-        ('XBOX', ('xbox','xbox360')),
+        ('NINTENDO', ('n64','gc','wii','wiiu','3ds','switch')),
+        ('XBOX', ('xbox','xbox360','xboxone')),
+        ('SEGA', ('dreamcast',)),
     )
 
 

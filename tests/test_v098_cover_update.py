@@ -42,12 +42,12 @@ def test_ui_uses_full_frame_not_letterbox_or_crop():
 
 
 def test_title_launcher_and_version_file_agree():
-    assert APP_VERSION == '0.9.12'
+    assert APP_VERSION == '0.9.33'
     assert version_file_matches()
     assert "self.setWindowTitle(f'GameShelf v{APP_VERSION} · Your Games, One Library')" in MAIN
     installer = (ROOT/'INSTALL_AND_RUN.bat').read_text(encoding='utf-8')
-    assert 'title GameShelf v0.9.12' in installer
-    assert 'GAMESHELF v0.9.12' in installer
+    assert 'title GameShelf v0.9.33' in installer
+    assert 'GAMESHELF v0.9.33' in installer
     assert 'v0.9.6' not in installer
     assert '0.9.6' not in MAIN
 
@@ -84,13 +84,13 @@ def test_update_real_install_verify_and_preserve_user_data(tmp_path):
     target,important=prepare_old_install(tmp_path)
     report=run_updater(target)
     assert report.returncode == 0,report.stderr
-    assert 'UPDATE VERIFIED: GameShelf v0.9.12' in report.stdout
+    assert 'UPDATE VERIFIED: GameShelf v0.9.33' in report.stdout
     assert 'outdated code' in report.stdout
     for name,original in important.items():
         assert (target/name).read_bytes() == original
     for name in ('main.py','library_view.py','cover_geometry.py','version_info.py','INSTALL_AND_RUN.bat','VERSION.txt'):
         assert hashlib.sha256((target/name).read_bytes()).digest() == hashlib.sha256((ROOT/name).read_bytes()).digest()
-    assert (target/'VERSION.txt').read_text().strip() == '0.9.12'
+    assert (target/'VERSION.txt').read_text().strip() == '0.9.33'
     check=run_updater(target,'--verify')
     assert check.returncode==0 and 'UPDATE VERIFIED' in check.stdout
     (target/'main.py').write_text('old version again')

@@ -5,8 +5,8 @@ from core import (EMULATORS,PLATFORMS,Library,Settings,detect_executables,scan_g
 
 
 def test_platforms_valid():
-    assert len(EMULATORS)==15
-    assert len({e.key for e in EMULATORS})==15
+    assert len(EMULATORS)==19
+    assert len({e.key for e in EMULATORS})==19
     assert all(p in PLATFORMS for e in EMULATORS for p in e.platforms)
 
 

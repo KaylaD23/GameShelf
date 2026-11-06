@@ -104,7 +104,7 @@ class SavedKeyTests(unittest.TestCase):
         assert 'setEchoMode(QLineEdit.EchoMode.Password)' in ui
         assert 'Save Key' in ui and 'Forget Key' in ui
         assert ui.count('store_field_key(') >= 5
-        assert ui.count('initial_api_key()') >= 3
+        assert ui.count('initial_api_key(') >= 3
         tree = ast.parse(ui)
         assert any(isinstance(n, ast.ClassDef) and n.name == 'BulkCoverDialog' for n in tree.body)
         assert any(isinstance(n, ast.ClassDef) and n.name == 'CoverBrowser' for n in tree.body)

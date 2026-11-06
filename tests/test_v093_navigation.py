@@ -42,7 +42,7 @@ def test_old_settings_without_startup_choice_default_to_desktop():
 
 def test_sidebar_console_order_and_separation_preserved():
     assert CONSOLE_GROUPS[0][1][:5]==('ps1','ps2','ps3','ps4','ps5')
-    assert CONSOLE_GROUPS[-1][1]==('xbox','xbox360')
+    assert CONSOLE_GROUPS[-2][1]==('xbox','xbox360','xboxone')
     assert 'switch' in PLATFORMS
     for name in ('make_big','sync_filter_controls','on_big_system','big_filter','refresh_big'):
         assert main_method(name)

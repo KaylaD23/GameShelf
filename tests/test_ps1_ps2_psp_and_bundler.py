@@ -12,7 +12,7 @@ spec.loader.exec_module(bundler)
 
 
 def test_twelve_emulators_and_new_platforms():
-    assert len(EMULATORS)==15
+    assert len(EMULATORS)==19
     assert {e.key for e in EMULATORS} >= {'duckstation','pcsx2','ppsspp'}
     assert set(PLATFORMS)>={'ps1','ps2','psp'}
 
